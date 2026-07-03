@@ -4571,8 +4571,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </script>
 
 <template>
-  <CustomContextMenu :items="treeItemMenuItems()" v-slot="{ onContextMenu }">
-    <div @contextmenu="onTreeItemContextMenu($event, onContextMenu)">
+  <CustomContextMenu :items="treeItemMenuItems()" v-slot="contextMenuSlot">
+    <div @contextmenu="onTreeItemContextMenu($event, contextMenuSlot.onContextMenu)">
       <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
         <div
           ref="rowRef"
