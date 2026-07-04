@@ -499,6 +499,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function recordConnectionError(connectionId: string, error: unknown): string {
     const message = connectionErrorMessage(error);
+    if (isCancelledConnectionAttempt(message)) {
+      clearConnectionError(connectionId);
+      return "";
+    }
     setConnectionError(connectionId, message);
     maybeAppendAgentDriverUpdateHint(connectionId, message);
     return message;

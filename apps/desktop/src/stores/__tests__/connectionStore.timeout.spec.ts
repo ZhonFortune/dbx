@@ -155,6 +155,7 @@ describe("connectionStore timeout recovery", () => {
     expect(disconnectDb).toHaveBeenCalledWith(connection.id);
     expect(store.connectingIds.has(connection.id)).toBe(false);
     expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(node.isLoading).toBe(false);
 
     await vi.advanceTimersByTimeAsync(3001);
@@ -164,6 +165,7 @@ describe("connectionStore timeout recovery", () => {
     expect(error.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
     expect(store.connectingIds.has(connection.id)).toBe(false);
     expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(node.isLoading).toBe(false);
   }, 10_000);
 });
