@@ -430,6 +430,24 @@ export const useConnectionStore = defineStore("connection", () => {
     return tracked;
   }
 
+  async function cleanupResolvedCancelledConnectionAttempt(connectionId: string, attempt: number) {
+    try {
+      // A cancel request can reach the backend before connect_db registers the
+      // attempt, so clean again if that cancelled connect later returns a pool.
+      await withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId, attempt));
+    } catch (error) {
+      console.warn("[DBX][connection:cancel-result-cleanup-error]", { connectionId, attempt, error });
+    }
+  }
+
+  async function ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId: string, attempt: number, cleanupConnectionId: string) {
+    if (isCancelledLocalConnectionAttempt(connectionId, attempt)) {
+      await cleanupResolvedCancelledConnectionAttempt(cleanupConnectionId, attempt);
+      throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    }
+    ensureLocalConnectionAttemptActive(connectionId, attempt);
+  }
+
   function ensureLocalConnectionAttemptActive(connectionId: string, attempt: number) {
     if (isCancelledLocalConnectionAttempt(connectionId, attempt)) {
       throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
@@ -1458,9 +1476,9 @@ export const useConnectionStore = defineStore("connection", () => {
       await beforeConnectHandler?.(config);
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
-      ensureLocalConnectionAttemptActive(config.id, localAttempt);
+      await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
-      ensureLocalConnectionAttemptActive(config.id, localAttempt);
+      await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
       markConnectionHealthChecked(id);
@@ -1611,10 +1629,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const connectPromise = (async () => {
       await beforeConnectHandler?.(config);
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
-      await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
-      ensureLocalConnectionAttemptActive(connectionId, localAttempt);
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
+      await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       await syncMongoLegacyDriverFallback(connectionId, config);
-      ensureLocalConnectionAttemptActive(connectionId, localAttempt);
+      await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;

@@ -234,6 +234,50 @@ describe("connectionStore timeout recovery", () => {
     await firstEnsure;
   }, 10_000);
 
+  it("cleans up backend state when a cancelled connection later succeeds", async () => {
+    let resolveConnect!: (connectionId: string) => void;
+    const connectDb = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveConnect = resolve;
+        }),
+    );
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 10 });
+    store.connections = [connection];
+
+    const ensure = store.ensureConnected(connection.id).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    const attempt = connectDb.mock.calls[0]?.[1];
+
+    await expect(store.cancelConnecting(connection.id)).resolves.toBe(true);
+    expect(disconnectDb).toHaveBeenCalledTimes(1);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, attempt);
+
+    resolveConnect(connection.id);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await ensure;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    expect(disconnectDb).toHaveBeenCalledTimes(2);
+    expect(disconnectDb).toHaveBeenLastCalledWith(connection.id, attempt);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+  }, 10_000);
+
   it("keeps errors from earlier cancelled attempts hidden after a second cancel", async () => {
     let rejectFirstConnect!: (error: Error) => void;
     let rejectSecondConnect!: (error: Error) => void;
