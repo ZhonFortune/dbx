@@ -168,4 +168,67 @@ describe("connectionStore timeout recovery", () => {
     expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(node.isLoading).toBe(false);
   }, 10_000);
+
+  it("waits for pending cancel before reconnecting the same connection", async () => {
+    let resolveDisconnect!: () => void;
+    const pendingConnect = new Promise<string>(() => undefined);
+    let connectCallCount = 0;
+    const connectDb = vi.fn(() => {
+      connectCallCount += 1;
+      return connectCallCount === 1 ? pendingConnect : Promise.resolve("pg-1");
+    });
+    const disconnectDb = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDisconnect = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 1 });
+    store.connections = [connection];
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isLoading: false,
+        children: [],
+      },
+    ];
+
+    const firstEnsure = store.ensureConnected(connection.id).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connectDb).toHaveBeenCalledTimes(1);
+
+    const cancel = store.cancelConnecting(connection.id);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id);
+
+    const reconnect = store.ensureConnected(connection.id);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connectDb).toHaveBeenCalledTimes(1);
+
+    resolveDisconnect();
+    await cancel;
+    await reconnect;
+
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(3001);
+    await firstEnsure;
+  }, 10_000);
 });

@@ -577,6 +577,20 @@ impl AppState {
         Ok(())
     }
 
+    async fn discard_stale_connection_attempt_pool(
+        &self,
+        connection_id: &str,
+        pool_key: String,
+        pool: PoolKind,
+        config: &ConnectionConfig,
+    ) {
+        if matches!(pool, PoolKind::MessageQueue) {
+            self.mq_registry.drop_connection(connection_id).await;
+        }
+        self.reset_connection_transport_for_config(connection_id, config).await;
+        close_pool_kind_with_timeout(pool_key, pool).await;
+    }
+
     async fn start_keepalive_task(&self, pool_key: &str, pool: &PoolKind, config: &ConnectionConfig) {
         let interval_secs = config.keepalive_interval_secs;
         let idle_timeout_secs = config.idle_timeout_secs;
@@ -764,7 +778,15 @@ impl AppState {
 
         validate_h2_file_connection(&db_config)?;
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
+        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+            return Err(err);
+        }
         probe_connection_endpoint(&db_config, &host, port).await?;
+        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+            return Err(err);
+        }
         let url = connection_url_for_endpoint(&db_config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -895,9 +917,21 @@ impl AppState {
                             Ok(()) => {
                                 // Re-check: another task may have created the pool while we were connecting.
                                 if self.connections.read().await.contains_key(&pool_key) {
+                                    close_pool_kind_with_timeout(pool_key.clone(), PoolKind::MongoDb(client)).await;
                                     return Ok(pool_key);
                                 }
-                                self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+                                if let Err(err) =
+                                    self.ensure_current_connection_attempt(connection_id, connection_attempt).await
+                                {
+                                    self.discard_stale_connection_attempt_pool(
+                                        connection_id,
+                                        pool_key.clone(),
+                                        PoolKind::MongoDb(client),
+                                        &db_config,
+                                    )
+                                    .await;
+                                    return Err(err);
+                                }
                                 self.insert_connection_pool(pool_key.clone(), PoolKind::MongoDb(client), &db_config)
                                     .await;
                                 return Ok(pool_key);
@@ -1093,6 +1127,11 @@ impl AppState {
                     self.mq_registry.drop_connection(connection_id).await;
                     return Err(err);
                 }
+                if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                    self.mq_registry.drop_connection(connection_id).await;
+                    self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                    return Err(err);
+                }
                 PoolKind::MessageQueue
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -1105,7 +1144,7 @@ impl AppState {
         };
 
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-            close_pool_kind_with_timeout(pool_key.clone(), pool).await;
+            self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &db_config).await;
             return Err(err);
         }
         self.insert_connection_pool(pool_key.clone(), pool, &db_config).await;
