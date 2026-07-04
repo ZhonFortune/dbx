@@ -358,9 +358,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
-  async function waitForDisconnectInFlight(connectionId: string): Promise<void> {
-    const pending = disconnectInFlight.get(connectionId);
-    if (pending) await pending;
+  function getDisconnectInFlight(connectionId: string): Promise<void> | undefined {
+    return disconnectInFlight.get(connectionId);
   }
 
   function trackDisconnectRequest(connectionId: string, request: Promise<void>): Promise<void> {
@@ -1399,7 +1398,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
-    await waitForDisconnectInFlight(config.id);
+    const pendingDisconnect = getDisconnectInFlight(config.id);
+    if (pendingDisconnect) await pendingDisconnect;
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
@@ -1544,7 +1544,8 @@ export const useConnectionStore = defineStore("connection", () => {
       recordConnectionError(connectionId, error);
       throw error;
     }
-    await waitForDisconnectInFlight(connectionId);
+    const pendingDisconnect = getDisconnectInFlight(connectionId);
+    if (pendingDisconnect) await pendingDisconnect;
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
       await existingConnect;
