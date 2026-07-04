@@ -117,4 +117,53 @@ describe("connectionStore timeout recovery", () => {
     expect(error).toBeInstanceOf(Error);
     expect(node.isLoading).toBe(false);
   }, 10_000);
+
+  it("cancels an in-flight connection without leaving connected or loading state", async () => {
+    const connectDb = vi.fn(() => new Promise(() => undefined));
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 1 });
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isLoading: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.treeNodes = [node];
+
+    const ensure = store.ensureConnected(connection.id).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(store.connectingIds.has(connection.id)).toBe(true);
+    expect(node.isLoading).toBe(true);
+
+    await expect(store.cancelConnecting(connection.id)).resolves.toBe(true);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id);
+    expect(store.connectingIds.has(connection.id)).toBe(false);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(node.isLoading).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(3001);
+    const error = await ensure;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    expect(store.connectingIds.has(connection.id)).toBe(false);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(node.isLoading).toBe(false);
+  }, 10_000);
 });

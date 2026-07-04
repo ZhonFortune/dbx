@@ -546,7 +546,11 @@ impl AppState {
         self.connection_attempts.read().await.get(connection_id).copied() == Some(attempt)
     }
 
-    async fn ensure_current_connection_attempt(&self, connection_id: &str, attempt: Option<u64>) -> Result<(), String> {
+    pub async fn ensure_current_connection_attempt(
+        &self,
+        connection_id: &str,
+        attempt: Option<u64>,
+    ) -> Result<(), String> {
         let Some(attempt) = attempt else {
             return Ok(());
         };

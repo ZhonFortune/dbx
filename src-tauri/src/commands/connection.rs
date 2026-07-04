@@ -819,7 +819,15 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+        state.reset_connection_transport_for_config(&id, &db_config).await;
+        return Err(err);
+    }
     probe_connection_endpoint(&db_config, &host, port).await?;
+    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+        state.reset_connection_transport_for_config(&id, &db_config).await;
+        return Err(err);
+    }
     let url = connection_url_for_endpoint(&db_config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -885,14 +893,17 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             if mongo_uses_legacy_driver(&db_config) {
                 let mut client =
                     state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
+                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 client
                     .connect(mongo_legacy_connect_params(&db_config, &host, port))
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             } else {
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
+                        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                         match db::mongo_driver::test_connection(
                             &client,
                             connect_timeout,
@@ -901,7 +912,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                         .await
                         {
                             Ok(()) => {
-                                state
+                                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                                if let Err(err) = state
                                     .insert_connection_pool_for_attempt(
                                         &id,
                                         attempt,
@@ -909,7 +921,11 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                                         PoolKind::MongoDb(client),
                                         &db_config,
                                     )
-                                    .await?;
+                                    .await
+                                {
+                                    state.reset_connection_transport_for_config(&id, &db_config).await;
+                                    return Err(err);
+                                }
                                 state.configs.write().await.insert(id.clone(), config);
                                 return Ok(id);
                             }
@@ -922,12 +938,14 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                     let mut client =
                         state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
+                    state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
                         format!(
                             "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
                             mongo_legacy_error_with_auth_hint(&err)
                         )
                     })?;
+                    state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
                     persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
@@ -1062,7 +1080,15 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                     return Err(err);
                 }
             };
+            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
             if let Err(err) = adapter.test_connection().await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
+            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
                 state.mq_registry.drop_connection(&id).await;
                 return Err(err);
             }
@@ -1086,7 +1112,12 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
-    state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await?;
+    if let Err(err) =
+        state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await
+    {
+        state.reset_connection_transport_for_config(&id, &connected_db_config).await;
+        return Err(err);
+    }
     state.configs.write().await.insert(id.clone(), connected_config);
 
     Ok(id)
