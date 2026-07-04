@@ -157,7 +157,7 @@ pub struct AppState {
     pub connections: Arc<RwLock<HashMap<String, PoolKind>>>,
     keepalive_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
-    connection_attempts: RwLock<HashMap<String, u64>>,
+    connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
@@ -178,6 +178,12 @@ pub struct AppState {
 #[derive(Clone, Copy)]
 struct PoolActivity {
     last_used_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct ConnectionAttemptState {
+    server_attempt: u64,
+    client_attempt: Option<u64>,
 }
 
 impl PoolActivity {
@@ -532,9 +538,17 @@ impl AppState {
     }
 
     pub async fn begin_connection_attempt(&self, connection_id: &str) -> u64 {
+        self.begin_connection_attempt_with_client_attempt(connection_id, None).await
+    }
+
+    pub async fn begin_connection_attempt_with_client_attempt(
+        &self,
+        connection_id: &str,
+        client_attempt: Option<u64>,
+    ) -> u64 {
         let mut attempts = self.connection_attempts.write().await;
-        let next = attempts.get(connection_id).copied().unwrap_or(0).wrapping_add(1);
-        attempts.insert(connection_id.to_string(), next);
+        let next = attempts.get(connection_id).map(|state| state.server_attempt).unwrap_or(0).wrapping_add(1);
+        attempts.insert(connection_id.to_string(), ConnectionAttemptState { server_attempt: next, client_attempt });
         next
     }
 
@@ -542,8 +556,27 @@ impl AppState {
         self.begin_connection_attempt(connection_id).await;
     }
 
+    pub async fn supersede_connection_attempt_if_client_attempt(
+        &self,
+        connection_id: &str,
+        client_attempt: u64,
+    ) -> bool {
+        let mut attempts = self.connection_attempts.write().await;
+        let Some(current) = attempts.get(connection_id).copied() else {
+            return false;
+        };
+        if current.client_attempt != Some(client_attempt) {
+            return false;
+        }
+        attempts.insert(
+            connection_id.to_string(),
+            ConnectionAttemptState { server_attempt: current.server_attempt.wrapping_add(1), client_attempt: None },
+        );
+        true
+    }
+
     async fn connection_attempt_is_current(&self, connection_id: &str, attempt: u64) -> bool {
-        self.connection_attempts.read().await.get(connection_id).copied() == Some(attempt)
+        self.connection_attempts.read().await.get(connection_id).map(|state| state.server_attempt) == Some(attempt)
     }
 
     pub async fn ensure_current_connection_attempt(
@@ -777,6 +810,7 @@ impl AppState {
         let db_config = database_connection_config(&config, database);
 
         validate_h2_file_connection(&db_config)?;
+        self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;

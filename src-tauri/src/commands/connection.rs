@@ -807,11 +807,15 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
 }
 
 #[tauri::command]
-pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+pub async fn connect_db(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+    client_attempt: Option<u64>,
+) -> Result<String, String> {
     let config = config.canonicalized();
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
-    let attempt = state.begin_connection_attempt(&id).await;
+    let attempt = state.begin_connection_attempt_with_client_attempt(&id, client_attempt).await;
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
@@ -1142,8 +1146,20 @@ pub async fn connection_final_proxy_port(
 }
 
 #[tauri::command]
-pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
-    state.supersede_connection_attempt(&connection_id).await;
+pub async fn disconnect_db(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    client_attempt: Option<u64>,
+) -> Result<(), String> {
+    let should_disconnect = if let Some(client_attempt) = client_attempt {
+        state.supersede_connection_attempt_if_client_attempt(&connection_id, client_attempt).await
+    } else {
+        state.supersede_connection_attempt(&connection_id).await;
+        true
+    };
+    if !should_disconnect {
+        return Ok(());
+    }
     state.remove_connection_pools_detached(&connection_id).await;
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;

@@ -63,7 +63,7 @@ describe("connectionStore timeout recovery", () => {
     await ensure;
 
     expect(checkConnectionHealth).toHaveBeenCalledWith(connection.id);
-    expect(connectDb).toHaveBeenCalledWith(connection);
+    expect(connectDb).toHaveBeenCalledWith(connection, expect.any(Number));
     expect(store.connectedIds.has(connection.id)).toBe(true);
   }, 10_000);
 
@@ -152,7 +152,7 @@ describe("connectionStore timeout recovery", () => {
     expect(node.isLoading).toBe(true);
 
     await expect(store.cancelConnecting(connection.id)).resolves.toBe(true);
-    expect(disconnectDb).toHaveBeenCalledWith(connection.id);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, expect.any(Number));
     expect(store.connectingIds.has(connection.id)).toBe(false);
     expect(store.connectedIds.has(connection.id)).toBe(false);
     expect(store.connectionErrors[connection.id]).toBeUndefined();
@@ -169,7 +169,7 @@ describe("connectionStore timeout recovery", () => {
     expect(node.isLoading).toBe(false);
   }, 10_000);
 
-  it("waits for pending cancel before reconnecting the same connection", async () => {
+  it("allows reconnecting the same connection while a scoped cancel is pending", async () => {
     let resolveDisconnect!: () => void;
     const pendingConnect = new Promise<string>(() => undefined);
     let connectCallCount = 0;
@@ -211,14 +211,16 @@ describe("connectionStore timeout recovery", () => {
     const firstEnsure = store.ensureConnected(connection.id).catch((error) => error);
     await vi.advanceTimersByTimeAsync(1);
     expect(connectDb).toHaveBeenCalledTimes(1);
+    const firstAttempt = connectDb.mock.calls[0]?.[1];
 
     const cancel = store.cancelConnecting(connection.id);
     await vi.advanceTimersByTimeAsync(1);
-    expect(disconnectDb).toHaveBeenCalledWith(connection.id);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, firstAttempt);
 
     const reconnect = store.ensureConnected(connection.id);
     await vi.advanceTimersByTimeAsync(1);
-    expect(connectDb).toHaveBeenCalledTimes(1);
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    expect(connectDb.mock.calls[1]?.[1]).not.toBe(firstAttempt);
 
     resolveDisconnect();
     await cancel;
@@ -230,5 +232,58 @@ describe("connectionStore timeout recovery", () => {
 
     await vi.advanceTimersByTimeAsync(3001);
     await firstEnsure;
+  }, 10_000);
+
+  it("keeps errors from earlier cancelled attempts hidden after a second cancel", async () => {
+    let rejectFirstConnect!: (error: Error) => void;
+    let rejectSecondConnect!: (error: Error) => void;
+    let connectCallCount = 0;
+    const connectDb = vi.fn(() => {
+      connectCallCount += 1;
+      return new Promise<string>((_, reject) => {
+        if (connectCallCount === 1) {
+          rejectFirstConnect = reject;
+        } else {
+          rejectSecondConnect = reject;
+        }
+      });
+    });
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 10 });
+    store.connections = [connection];
+
+    const firstEnsure = store.ensureConnected(connection.id).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connectDb).toHaveBeenCalledTimes(1);
+    await expect(store.cancelConnecting(connection.id)).resolves.toBe(true);
+
+    const secondEnsure = store.ensureConnected(connection.id).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    await expect(store.cancelConnecting(connection.id)).resolves.toBe(true);
+
+    rejectFirstConnect(new Error("first connection failed after cancel"));
+    const firstError = await firstEnsure;
+    expect(firstError).toBeInstanceOf(Error);
+    expect(firstError.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+
+    rejectSecondConnect(new Error("second connection failed after cancel"));
+    const secondError = await secondEnsure;
+    expect(secondError).toBeInstanceOf(Error);
+    expect(secondError.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
   }, 10_000);
 });
