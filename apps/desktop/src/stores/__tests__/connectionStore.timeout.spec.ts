@@ -127,6 +127,7 @@ describe("connectionStore timeout recovery", () => {
       connectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
