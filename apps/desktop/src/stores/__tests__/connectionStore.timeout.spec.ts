@@ -234,6 +234,149 @@ describe("connectionStore timeout recovery", () => {
     await firstEnsure;
   }, 10_000);
 
+  it("allows reconnecting the same connection while a scoped disconnect is pending", async () => {
+    let resolveDisconnect!: () => void;
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const disconnectDb = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDisconnect = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 10 });
+    store.connections = [connection];
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isLoading: true,
+        isExpanded: true,
+        children: [],
+      },
+    ];
+
+    await store.connect(connection);
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    const firstAttempt = connectDb.mock.calls[0]?.[1];
+
+    const disconnect = store.disconnect(connection.id);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, firstAttempt);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.treeNodes[0]?.isLoading).toBe(false);
+    expect(store.treeNodes[0]?.isExpanded).toBe(false);
+
+    await store.connect(connection);
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    expect(connectDb.mock.calls[1]?.[1]).not.toBe(firstAttempt);
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+
+    resolveDisconnect();
+    await disconnect;
+
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+  }, 10_000);
+
+  it("keeps a newer reconnect error when an older scoped disconnect finishes later", async () => {
+    let resolveDisconnect!: () => void;
+    let connectCallCount = 0;
+    const connectDb = vi.fn(() => {
+      connectCallCount += 1;
+      return connectCallCount === 1 ? Promise.resolve("pg-1") : Promise.reject(new Error("reconnect failed"));
+    });
+    const disconnectDb = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDisconnect = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 10 });
+    store.connections = [connection];
+
+    await store.connect(connection);
+    const firstAttempt = connectDb.mock.calls[0]?.[1];
+
+    const disconnect = store.disconnect(connection.id);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, firstAttempt);
+
+    await expect(store.connect(connection)).rejects.toThrow("reconnect failed");
+    expect(store.connectionErrors[connection.id]).toBe("reconnect failed");
+
+    resolveDisconnect();
+    await disconnect;
+
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.connectionErrors[connection.id]).toBe("reconnect failed");
+  }, 10_000);
+
+  it("scopes a normal disconnect to the active connection attempt when one is running", async () => {
+    let resolveConnect!: (connectionId: string) => void;
+    const connectDb = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveConnect = resolve;
+        }),
+    );
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({ connect_timeout_secs: 10 });
+    store.connections = [connection];
+
+    const connect = store.connect(connection).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    const activeAttempt = connectDb.mock.calls[0]?.[1];
+
+    await store.disconnect(connection.id);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id, activeAttempt);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+
+    resolveConnect(connection.id);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await connect;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    expect(disconnectDb).toHaveBeenLastCalledWith(connection.id, activeAttempt);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+  }, 10_000);
+
   it("cleans up backend state when a cancelled connection later succeeds", async () => {
     let resolveConnect!: (connectionId: string) => void;
     const connectDb = vi.fn(
