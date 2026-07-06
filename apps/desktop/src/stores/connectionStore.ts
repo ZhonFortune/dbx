@@ -443,8 +443,17 @@ export const useConnectionStore = defineStore("connection", () => {
     activeLocalConnectionAttempts.delete(connectionId);
     connectingIds.value.delete(connectionId);
     clearConnectionNodeLoading(connectionId);
+    clearConnectionRootMetadataLoad(connectionId);
     connectInFlight.delete(connectionId);
     return true;
+  }
+
+  function clearConnectionRootMetadataLoad(connectionId: string) {
+    metadataLoadCoordinator.clear({
+      kind: "connection-databases",
+      connectionId,
+      driverProfile: metadataDriverProfile(getConfig(connectionId)),
+    });
   }
 
   function getBlockingDisconnectInFlight(connectionId: string): Promise<void> | undefined {
@@ -1802,6 +1811,7 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isExpanded = false;
       node.children = [];
     }
+    clearConnectionRootMetadataLoad(connectionId);
     clearLoadedChildrenCache(connectionId);
     if (activeConnectionId.value === connectionId) {
       activeConnectionId.value = null;
