@@ -4566,6 +4566,7 @@ mod tests {
             create_table: true,
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         }
     }
